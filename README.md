@@ -27,7 +27,9 @@ This MCP server wraps that endpoint behind tool calls.
 
 ## Status
 
-Early — only `health_check` is implemented. Bulk operations are next.
+All 10 tools implemented and live-tested against a real Paperless-ngx
+instance. Resolvers verified end-to-end; bulk operations are wired through
+the same `_bulk_edit` helper and share the same response shape.
 
 ## Install
 
@@ -71,19 +73,41 @@ into the host config.
 
 ## Tool catalog
 
-| Tool | Status | Description |
-|---|---|---|
-| `health_check` | ✅ | Confirms reachability and token validity. |
-| `bulk_add_tag` | 🚧 | Add a tag to N documents. |
-| `bulk_remove_tag` | 🚧 | Remove a tag from N documents. |
-| `bulk_set_correspondent` | 🚧 | Assign a correspondent to N documents. |
-| `bulk_set_document_type` | 🚧 | Assign a document type to N documents. |
-| `bulk_set_storage_path` | 🚧 | Assign a storage path to N documents. |
-| `bulk_delete` | 🚧 | Delete N documents (Paperless trash). |
-| `bulk_redo_ocr` | 🚧 | Re-run OCR for N documents. |
-| `find_tag_by_name` | 🚧 | Resolve a tag name to ID (uses `?name__icontains=`). |
-| `find_correspondent_by_name` | 🚧 | Resolve a correspondent name to ID. |
-| `find_document_type_by_name` | 🚧 | Resolve a document type name to ID. |
+**Diagnostics**
+
+| Tool | Description |
+|---|---|
+| `health_check` | Confirms reachability and token validity. |
+
+**Resolvers (name → ID)**
+
+| Tool | Description |
+|---|---|
+| `find_tag_by_name(name, limit=5)` | Resolve a tag name to one or more IDs (case-insensitive substring). |
+| `find_correspondent_by_name(name, limit=5)` | Resolve a correspondent name to IDs. |
+| `find_document_type_by_name(name, limit=5)` | Resolve a document type name to IDs. |
+
+**Bulk write operations**
+
+| Tool | Description |
+|---|---|
+| `bulk_add_tag(document_ids, tag_id)` | Add a tag to N documents (idempotent). |
+| `bulk_remove_tag(document_ids, tag_id)` | Remove a tag from N documents (idempotent). |
+| `bulk_modify_tags(document_ids, add_tags?, remove_tags?)` | Add and/or remove multiple tags in one batch — typical inbox-processing call. |
+| `bulk_set_correspondent(document_ids, correspondent_id)` | Assign correspondent (pass `None` to clear). |
+| `bulk_set_document_type(document_ids, document_type_id)` | Assign document type (pass `None` to clear). |
+| `bulk_set_storage_path(document_ids, storage_path_id)` | Assign storage path (pass `None` to clear). |
+| `bulk_redo_ocr(document_ids)` | Queue OCR re-run on N documents (async on Paperless). |
+
+### Deliberately not included
+
+- **`bulk_delete`** — Paperless is a long-term archive ("once in, never out");
+  bulk delete is the riskiest operation for an LLM-driven tool. Removed
+  from v1. If ever added, must require an explicit user-provided
+  `confirm_phrase` string parameter, not just a boolean.
+- **`update_document_title`** — title edits aren't supported by `bulk_edit`
+  and would require PUT/PATCH (the very thing this MCP exists to avoid).
+  Use the Paperless UI for the rare case you need it.
 
 Naming-resolver tools exist because the `bulk_edit` endpoint takes IDs, but
 humans (and LLMs) reason in names. They also enforce the
