@@ -1,0 +1,27 @@
+# Secrets
+.env
+.env.local
+*.key
+*.secret
+*.pem
+
+# macOS / Editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
