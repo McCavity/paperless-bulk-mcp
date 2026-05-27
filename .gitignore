@@ -25,3 +25,7 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# Worktrees (used for isolated feature branches)
+.worktrees/
+.worktrees
