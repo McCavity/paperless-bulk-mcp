@@ -136,6 +136,74 @@ def _find_by_name(endpoint: str, name: str, limit: int = 5) -> dict[str, Any]:
     }
 
 
+# Hard upper bound on list_documents result size. Keeps LLM context windows
+# sane and prevents accidental DB-wide pulls. If users hit this regularly,
+# open an issue for proper pagination.
+_LIST_DOCUMENTS_MAX_LIMIT = 100
+
+
+def _list_documents(
+    tag_id: int | None = None,
+    correspondent_id: int | None = None,
+    document_type_id: int | None = None,
+    limit: int = 20,
+    ordering: str = "-added",
+) -> dict[str, Any]:
+    """GET /api/documents/ with server-side filters, return a compact shape.
+
+    Never grep page 1 — every filter goes as a Paperless query param. Result
+    is trimmed to id/title/added/correspondent/document_type/tags so it fits
+    in an LLM context window; the caller can follow up via PaperCortex or
+    direct API for full document bodies.
+    """
+    capped_limit = max(1, min(limit, _LIST_DOCUMENTS_MAX_LIMIT))
+
+    params: dict[str, str | int] = {
+        "page_size": capped_limit,
+        "ordering": ordering,
+    }
+    if tag_id is not None:
+        params["tags__id"] = tag_id
+    if correspondent_id is not None:
+        params["correspondent__id"] = correspondent_id
+    if document_type_id is not None:
+        params["document_type__id"] = document_type_id
+
+    with httpx.Client(timeout=PAPERLESS_TIMEOUT) as client:
+        resp = client.get(
+            f"{PAPERLESS_URL}/api/documents/",
+            headers=_headers(),
+            params=params,
+        )
+
+    if resp.status_code >= 400:
+        return {
+            "ok": False,
+            "status": resp.status_code,
+            "error": resp.text[:500],
+        }
+
+    body = resp.json()
+    results = [
+        {
+            "id": d["id"],
+            "title": d.get("title", ""),
+            # Trim the ISO timestamp to date — sub-second precision is noise
+            # for the inbox-status use case.
+            "added": (d.get("added") or "")[:10],
+            "correspondent": d.get("correspondent"),
+            "document_type": d.get("document_type"),
+            "tags": d.get("tags", []),
+        }
+        for d in body.get("results", [])
+    ]
+    return {
+        "count": body.get("count", 0),
+        "returned": len(results),
+        "results": results,
+    }
+
+
 # ---------------------------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------------------------
@@ -193,6 +261,151 @@ def find_document_type_by_name(name: str, limit: int = 5) -> dict[str, Any]:
     Use before bulk_set_document_type.
     """
     return _find_by_name("document_types", name, limit)
+
+
+# --- Reads (filter + list, NOT full-text search) ---------------------------
+
+
+# Module-level cache of the inbox tag ID once resolved via API. None means
+# "not yet resolved" — env var lookup happens first regardless.
+_INBOX_TAG_ID_CACHE: int | None = None
+
+
+def _reset_inbox_tag_cache() -> None:
+    """Clear the module-level inbox-tag-id cache. Test hook."""
+    global _INBOX_TAG_ID_CACHE
+    _INBOX_TAG_ID_CACHE = None
+
+
+def _resolve_inbox_tag_id() -> dict[str, Any]:
+    """Return {"ok": True, "tag_id": int} or {"ok": False, "error": str}.
+
+    Resolution order:
+      1. PAPERLESS_INBOX_TAG_ID env var (cheap, no roundtrip)
+      2. Cached value from a previous resolution this process
+      3. /api/tags/?name__icontains=eingang — must match exactly one tag.
+         Ambiguous or missing → error pointing the user at the env var.
+    """
+    global _INBOX_TAG_ID_CACHE
+
+    env_value = os.environ.get("PAPERLESS_INBOX_TAG_ID", "").strip()
+    if env_value:
+        try:
+            return {"ok": True, "tag_id": int(env_value)}
+        except ValueError:
+            return {
+                "ok": False,
+                "error": (
+                    f"PAPERLESS_INBOX_TAG_ID is set but not an integer: "
+                    f"{env_value!r}"
+                ),
+            }
+
+    if _INBOX_TAG_ID_CACHE is not None:
+        return {"ok": True, "tag_id": _INBOX_TAG_ID_CACHE}
+
+    with httpx.Client(timeout=PAPERLESS_TIMEOUT) as client:
+        resp = client.get(
+            f"{PAPERLESS_URL}/api/tags/",
+            headers=_headers(),
+            params={"name__icontains": "eingang", "page_size": 10},
+        )
+
+    if resp.status_code >= 400:
+        return {
+            "ok": False,
+            "error": (
+                f"Tag lookup failed ({resp.status_code}): {resp.text[:200]}. "
+                f"Set PAPERLESS_INBOX_TAG_ID to skip the name lookup."
+            ),
+        }
+
+    matches = resp.json().get("results", [])
+    if len(matches) == 0:
+        return {
+            "ok": False,
+            "error": (
+                "No inbox tag found (searched for 'eingang' case-insensitively). "
+                "Set PAPERLESS_INBOX_TAG_ID in .env to the correct tag ID."
+            ),
+        }
+    if len(matches) > 1:
+        names = ", ".join(f"{m['name']!r} (id={m['id']})" for m in matches)
+        return {
+            "ok": False,
+            "error": (
+                f"Inbox tag is ambiguous — {len(matches)} candidates: {names}. "
+                f"Set PAPERLESS_INBOX_TAG_ID in .env to pick the right one."
+            ),
+        }
+
+    tag_id = int(matches[0]["id"])
+    _INBOX_TAG_ID_CACHE = tag_id
+    return {"ok": True, "tag_id": tag_id}
+
+
+@mcp.tool()
+def list_inbox(limit: int = 20) -> dict[str, Any]:
+    """List documents currently in the inbox (tagged with the Eingang tag).
+
+    Returns the same compact shape as list_documents. Use this at session
+    start to see whether there are unprocessed documents that need tags /
+    correspondent / type set.
+
+    The inbox tag ID is resolved in this order:
+      1. PAPERLESS_INBOX_TAG_ID env (preferred — no roundtrip).
+      2. One-time lookup via /api/tags/?name__icontains=eingang. Cached
+         for the rest of the process.
+
+    If the name lookup is ambiguous (multiple "Eingang*" tags) or finds no
+    match, the tool returns an error with the candidate list — set the env
+    var explicitly in that case.
+    """
+    resolved = _resolve_inbox_tag_id()
+    if not resolved.get("ok"):
+        return resolved
+    return _list_documents(tag_id=resolved["tag_id"], limit=limit)
+
+
+@mcp.tool()
+def list_documents(
+    tag_id: int | None = None,
+    correspondent_id: int | None = None,
+    document_type_id: int | None = None,
+    limit: int = 20,
+    ordering: str = "-added",
+) -> dict[str, Any]:
+    """List documents matching one or more server-side filters.
+
+    Returns a compact shape suitable for an LLM context window:
+
+        {
+          "count": <total matching>,
+          "returned": <items in this batch>,
+          "results": [{"id", "title", "added", "correspondent", "document_type", "tags"}, ...]
+        }
+
+    Use this for inventory questions ("what's in the inbox?",
+    "everything from Stadtwerke this year?"). For full-text search of
+    document *content*, use PaperCortex (the read-side companion MCP).
+
+    Parameters
+    ----------
+    tag_id, correspondent_id, document_type_id
+        Optional filters by ID — combine freely. Pass `None` to skip.
+    limit
+        Max documents to return. Clamped to 100 (LLM-context safety).
+    ordering
+        Paperless ordering string. Default `-added` = newest first.
+        Other useful values: `-created`, `title`, `-modified`.
+    """
+    return _list_documents(
+        tag_id=tag_id,
+        correspondent_id=correspondent_id,
+        document_type_id=document_type_id,
+        limit=limit,
+        ordering=ordering,
+    )
 
 
 # --- Tag operations --------------------------------------------------------
