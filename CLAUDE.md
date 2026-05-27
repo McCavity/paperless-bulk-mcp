@@ -1,23 +1,30 @@
 # paperless-bulk-mcp — Conventions for AI agents
 
-> Last update: 2026-05-24
+> Last update: 2026-05-27
 
 This file orients AI coding agents (Claude Code, Codex, etc.) when working
 on this repository. Humans should read [README.md](README.md) first.
 
 ## What this project is
 
-A Model Context Protocol server that wraps Paperless-ngx' `bulk_edit`
-endpoint. Designed as the **write-side companion** to read-only search
-MCPs like PaperCortex.
+A Model Context Protocol server for Paperless-ngx. Two halves:
+
+1. **Bulk writes** via Paperless' native `bulk_edit` endpoint — tags,
+   correspondents, document types, storage paths, OCR re-runs.
+2. **Filtered reads** — `list_inbox` and `list_documents` for inventory
+   workflows. (For full-text search of document **content**, point the
+   caller at PaperCortex — the vector-index sibling MCP.)
 
 Transport: stdio. Framework: [FastMCP](https://github.com/jlowin/fastmcp).
 
 ## Key design choices
 
-- **Single `server.py`, no package split.** Stays under ~300 lines for the
-  full tool set. If it ever grows past that, split per-domain (tags /
-  correspondents / etc.) — but not preemptively.
+- **Single `server.py`, no package split.** Originally budgeted under ~300
+  lines; now at ~520 with the read tools added. Still readable as one file
+  (helpers grouped, tools grouped under `# ---` banner comments). The split
+  trigger is **cognitive load**, not raw lines — extract per-domain
+  (`reads.py` / `bulk_writes.py` / `resolvers.py` + a shared `client.py`)
+  when navigation actually slows you down, not preemptively.
 - **`.env` next to `server.py`, not in CWD.** The MCP host launches us
   from arbitrary directories; we load `.env` relative to the file path.
 - **No mutating call without explicit IDs.** Every bulk operation takes
@@ -26,6 +33,18 @@ Transport: stdio. Framework: [FastMCP](https://github.com/jlowin/fastmcp).
 - **`bulk_edit` endpoint over PUT/PATCH.** PUT requires the full document
   body; OCR'd documents with control characters break JSON parsing
   (KI-OS Lerneintrag 2026-05-14). `bulk_edit` only takes IDs.
+- **Reads return a compact LLM-friendly shape.** `{count, returned, results}`
+  with each result trimmed to `id/title/added/correspondent/document_type/tags`.
+  Caller does follow-up via PaperCortex or direct API if it needs the full
+  document body. `added` is trimmed to date (sub-second is noise).
+- **Inbox tag ID: env first, name lookup as fallback.** `list_inbox` reads
+  `PAPERLESS_INBOX_TAG_ID` if set; otherwise resolves once via
+  `/api/tags/?name__icontains=eingang` and caches the result. Ambiguous or
+  missing → error with the candidate list, pointing the user at the env var.
+- **Hard limit clamp on reads.** `list_documents` clamps `limit` to 100 to
+  protect both the LLM context window and the Paperless instance from
+  accidental DB-wide pulls. If users hit this regularly, open an issue for
+  proper pagination.
 
 ## Paperless API gotchas (carry-over from the KI-OS Lernprotokoll)
 
@@ -53,17 +72,30 @@ Transport: stdio. Framework: [FastMCP](https://github.com/jlowin/fastmcp).
 
 ## Testing
 
-TBD — start with manual `stdio-test.sh` (echo MCP JSON-RPC frames into
-`server.py`, assert against expected output). Move to pytest if the matrix
-grows.
+pytest + [respx](https://lundberg.github.io/respx/) for HTTP mocking. Run with:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+`tests/conftest.py` stubs `PAPERLESS_URL` / `PAPERLESS_TOKEN` before importing
+`server` (the module fails fast on missing env at import time). All tests use
+respx — no live Paperless calls. For end-to-end verification against a real
+Paperless instance, drop into the `.venv` and `import server` with the real
+`.env` loaded — see the PR description for issue #1 for the live-smoke recipe.
 
 ## Future "to-do"-flagged items
 
-- [ ] Implement the seven bulk tools listed in README.
-- [ ] Implement the three find_*_by_name helpers.
-- [ ] Add a `stdio-test.sh` smoke test runner.
+- [x] Implement the seven bulk tools listed in README.
+- [x] Implement the three find_*_by_name helpers.
+- [x] Add a test suite (pytest + respx).
+- [x] Implement read tools (`list_documents`, `list_inbox`) — issue #1.
 - [ ] Decide: should `bulk_delete` require an explicit `confirm=True`
       parameter to prevent accidental bulk deletion from an LLM call?
+- [ ] Split `server.py` per-domain once navigation actually slows down
+      (helpers grouped well, but past ~700 lines this stops scaling).
 
 ## Pattern hints for sibling MCPs
 

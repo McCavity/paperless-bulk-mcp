@@ -1,11 +1,13 @@
 # paperless-bulk-mcp
 
-> Bulk write operations for [Paperless-ngx](https://docs.paperless-ngx.com/) via Model Context Protocol.
+> Bulk write operations + filtered reads for [Paperless-ngx](https://docs.paperless-ngx.com/) via Model Context Protocol.
 
-Companion to read-only search MCPs (such as PaperCortex). Where those let an
-LLM **find** documents, this server lets it **change** them in bulk — set
-correspondents, add/remove tags, change document types, etc. — using
-Paperless' native `bulk_edit` endpoint.
+Companion to full-text-search MCPs (such as PaperCortex). Where PaperCortex
+**searches** document content via vector index, this server lets an LLM
+**list** and **change** documents in bulk — set correspondents, add/remove
+tags, change document types, etc. — using Paperless' native `bulk_edit`
+endpoint, plus a couple of compact list endpoints for filter-and-list
+workflows like "what's in the inbox right now?".
 
 ## Why this exists
 
@@ -27,9 +29,11 @@ This MCP server wraps that endpoint behind tool calls.
 
 ## Status
 
-All 10 tools implemented and live-tested against a real Paperless-ngx
-instance. Resolvers verified end-to-end; bulk operations are wired through
-the same `_bulk_edit` helper and share the same response shape.
+12 tools implemented and live-tested against a real Paperless-ngx instance.
+Resolvers + reads verified end-to-end; bulk operations are wired through the
+same `_bulk_edit` helper and share the same response shape. 11 pytest tests
+cover happy paths, empty results, errors, and the inbox-tag-resolution
+fallback for `list_inbox`.
 
 ## Install
 
@@ -55,7 +59,17 @@ python server.py
 # (server now listens on stdin — feed it MCP JSON-RPC frames)
 ```
 
-For a quick smoke test, see `tests/` (TBD).
+## Running the test suite
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The suite uses [`respx`](https://lundberg.github.io/respx/) to mock the
+Paperless HTTP layer — no live instance needed. Test env is stubbed in
+`tests/conftest.py` before `server` is imported.
 
 ## Register as a Claude Code MCP
 
@@ -87,6 +101,13 @@ into the host config.
 | `find_correspondent_by_name(name, limit=5)` | Resolve a correspondent name to IDs. |
 | `find_document_type_by_name(name, limit=5)` | Resolve a document type name to IDs. |
 
+**Reads (filter + list — NOT full-text search)**
+
+| Tool | Description |
+|---|---|
+| `list_inbox(limit=20)` | List documents currently in the inbox tag. Resolves the tag ID via `PAPERLESS_INBOX_TAG_ID` env (preferred, no roundtrip) or a one-time `/api/tags/?name__icontains=eingang` lookup (cached for the process). Errors with the candidate list if the name is ambiguous or missing. |
+| `list_documents(tag_id?, correspondent_id?, document_type_id?, limit=20, ordering="-added")` | Generic server-side filter — combine tag, correspondent, and document-type filters. Returns a compact LLM-friendly shape: `{count, returned, results: [{id, title, added, correspondent, document_type, tags}]}`. For full-text search of document **content**, use PaperCortex instead. Limit is clamped to 100. |
+
 **Bulk write operations**
 
 | Tool | Description |
@@ -117,14 +138,19 @@ humans (and LLMs) reason in names. They also enforce the
 
 ```
 paperless-bulk-mcp/
-├── .env.example       # Template for the secret file
-├── .gitignore         # Ignores .env, venv, caches
-├── CLAUDE.md          # Conventions for AI agents working on this repo
-├── LICENSE            # MIT
-├── README.md          # This file
-├── requirements.txt   # fastmcp, httpx, python-dotenv
-├── server.py          # FastMCP server, all tools
-└── tests/             # (TBD)
+├── .env.example          # Template for the secret file
+├── .gitignore            # Ignores .env, venv, caches, .worktrees/
+├── CLAUDE.md             # Conventions for AI agents working on this repo
+├── LICENSE               # MIT
+├── README.md             # This file
+├── requirements.txt      # Runtime: fastmcp, httpx, python-dotenv
+├── requirements-dev.txt  # Tests: pytest, respx (+ runtime)
+├── pytest.ini            # Test config
+├── server.py             # FastMCP server, all tools
+└── tests/
+    ├── conftest.py            # Env stubs, fixtures
+    ├── test_list_documents.py # Reads — filter + clamp + errors
+    └── test_list_inbox.py     # Inbox resolution: env, cache, ambiguity
 ```
 
 ## License
