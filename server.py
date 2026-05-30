@@ -204,6 +204,133 @@ def _list_documents(
     }
 
 
+# Taxonomy lists (correspondents / tags / document_types) cap higher than
+# documents — the payload per item is tiny and "show me everything" is the
+# whole point of these endpoints.
+_LIST_TAXONOMY_MAX_LIMIT = 200
+
+
+def _list_correspondents(
+    limit: int = 100,
+    ordering: str = "name",
+) -> dict[str, Any]:
+    """GET /api/correspondents/ → compact (id, name, document_count)."""
+    capped_limit = max(1, min(limit, _LIST_TAXONOMY_MAX_LIMIT))
+    params = {"page_size": capped_limit, "ordering": ordering}
+
+    with httpx.Client(timeout=PAPERLESS_TIMEOUT) as client:
+        resp = client.get(
+            f"{PAPERLESS_URL}/api/correspondents/",
+            headers=_headers(),
+            params=params,
+        )
+
+    if resp.status_code >= 400:
+        return {"ok": False, "status": resp.status_code, "error": resp.text[:500]}
+
+    body = resp.json()
+    results = [
+        {
+            "id": c["id"],
+            "name": c.get("name", ""),
+            "document_count": c.get("document_count", 0),
+        }
+        for c in body.get("results", [])
+    ]
+    return {
+        "count": body.get("count", 0),
+        "returned": len(results),
+        "results": results,
+    }
+
+
+def _delete_taxonomy(endpoint: str, item_id: int) -> dict[str, Any]:
+    """Shared DELETE wrapper for /api/<endpoint>/{id}/.
+
+    Returns ``{ok: True, status: 204, id: <id>}`` on success and the standard
+    ``ok=False`` envelope on any 4xx. Used by ``delete_correspondent`` and
+    ``delete_tag``; merge_* composites call this directly for the cleanup leg.
+    """
+    with httpx.Client(timeout=PAPERLESS_TIMEOUT) as client:
+        resp = client.delete(
+            f"{PAPERLESS_URL}/api/{endpoint}/{item_id}/",
+            headers=_headers(),
+        )
+
+    if resp.status_code >= 400:
+        return {"ok": False, "status": resp.status_code, "error": resp.text[:500]}
+    return {"ok": True, "status": resp.status_code, "id": item_id}
+
+
+def _list_document_types(
+    limit: int = 100,
+    ordering: str = "name",
+) -> dict[str, Any]:
+    """GET /api/document_types/ → compact (id, name, document_count)."""
+    capped_limit = max(1, min(limit, _LIST_TAXONOMY_MAX_LIMIT))
+    params = {"page_size": capped_limit, "ordering": ordering}
+
+    with httpx.Client(timeout=PAPERLESS_TIMEOUT) as client:
+        resp = client.get(
+            f"{PAPERLESS_URL}/api/document_types/",
+            headers=_headers(),
+            params=params,
+        )
+
+    if resp.status_code >= 400:
+        return {"ok": False, "status": resp.status_code, "error": resp.text[:500]}
+
+    body = resp.json()
+    results = [
+        {
+            "id": d["id"],
+            "name": d.get("name", ""),
+            "document_count": d.get("document_count", 0),
+        }
+        for d in body.get("results", [])
+    ]
+    return {
+        "count": body.get("count", 0),
+        "returned": len(results),
+        "results": results,
+    }
+
+
+def _list_tags(
+    limit: int = 100,
+    ordering: str = "name",
+) -> dict[str, Any]:
+    """GET /api/tags/ → compact (id, name, document_count, color)."""
+    capped_limit = max(1, min(limit, _LIST_TAXONOMY_MAX_LIMIT))
+    params = {"page_size": capped_limit, "ordering": ordering}
+
+    with httpx.Client(timeout=PAPERLESS_TIMEOUT) as client:
+        resp = client.get(
+            f"{PAPERLESS_URL}/api/tags/",
+            headers=_headers(),
+            params=params,
+        )
+
+    if resp.status_code >= 400:
+        return {"ok": False, "status": resp.status_code, "error": resp.text[:500]}
+
+    body = resp.json()
+    results = [
+        {
+            "id": t["id"],
+            "name": t.get("name", ""),
+            "document_count": t.get("document_count", 0),
+            "color": t.get("color"),
+        }
+        for t in body.get("results", [])
+    ]
+    return {
+        "count": body.get("count", 0),
+        "returned": len(results),
+        "results": results,
+    }
+
+
 # ---------------------------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------------------------
@@ -406,6 +533,207 @@ def list_documents(
         limit=limit,
         ordering=ordering,
     )
+
+
+@mcp.tool()
+def list_correspondents(
+    limit: int = 100,
+    ordering: str = "name",
+) -> dict[str, Any]:
+    """List Paperless correspondents (full inventory).
+
+    Returns compact shape suitable for an LLM context window:
+
+        {
+          "count": <total>,
+          "returned": <items in this batch>,
+          "results": [{"id", "name", "document_count"}, ...]
+        }
+
+    Use this for inventory ("which correspondents do I have?") or to find
+    candidates before merging. For lookup-by-name use ``find_correspondent_by_name``.
+
+    Parameters
+    ----------
+    limit
+        Max correspondents. Clamped to 200.
+    ordering
+        Paperless ordering. Default ``name``. Useful: ``-document_count``
+        (most-used first), ``-last_correspondence`` (recently active).
+    """
+    return _list_correspondents(limit=limit, ordering=ordering)
+
+
+@mcp.tool()
+def list_tags(
+    limit: int = 100,
+    ordering: str = "name",
+) -> dict[str, Any]:
+    """List Paperless tags (full inventory).
+
+    Returns compact shape:
+
+        {
+          "count": <total>,
+          "returned": <items in this batch>,
+          "results": [{"id", "name", "document_count", "color"}, ...]
+        }
+
+    Use this for inventory ("which tags are defined?") or to find candidates
+    before merging/renaming. For lookup-by-name use ``find_tag_by_name``.
+
+    Parameters
+    ----------
+    limit
+        Max tags. Clamped to 200.
+    ordering
+        Paperless ordering. Default ``name``. Useful: ``-document_count``
+        (most-used first).
+    """
+    return _list_tags(limit=limit, ordering=ordering)
+
+
+@mcp.tool()
+def list_document_types(
+    limit: int = 100,
+    ordering: str = "name",
+) -> dict[str, Any]:
+    """List Paperless document types (full inventory).
+
+    Returns compact shape:
+
+        {
+          "count": <total>,
+          "returned": <items in this batch>,
+          "results": [{"id", "name", "document_count"}, ...]
+        }
+
+    Parameters
+    ----------
+    limit
+        Max document types. Clamped to 200.
+    ordering
+        Paperless ordering. Default ``name``. Useful: ``-document_count``.
+    """
+    return _list_document_types(limit=limit, ordering=ordering)
+
+
+@mcp.tool()
+def delete_correspondent(correspondent_id: int) -> dict[str, Any]:
+    """Delete a Paperless correspondent by ID.
+
+    Returns ``{ok: True, status: 204, id: <id>}`` on success; ``{ok: False, ...}``
+    on any 4xx (typical: 404 missing, 400 still referenced by documents).
+
+    Use after ``merge_correspondents`` if the merge tool left the source
+    standing, or for plain cleanup of empty correspondents. Documents still
+    referencing the deleted correspondent have their correspondent set to
+    ``null`` by Paperless — call ``bulk_set_correspondent`` first if you want
+    to reassign them explicitly.
+    """
+    return _delete_taxonomy("correspondents", correspondent_id)
+
+
+@mcp.tool()
+def delete_tag(tag_id: int) -> dict[str, Any]:
+    """Delete a Paperless tag by ID.
+
+    Returns ``{ok: True, status: 204, id: <id>}`` on success; ``{ok: False, ...}``
+    on any 4xx (typical: 404 missing).
+
+    Documents that had the deleted tag simply lose it (Paperless does not
+    block deletion of an in-use tag). Use ``bulk_remove_tag`` first if you
+    want auditable removal across the affected documents.
+    """
+    return _delete_taxonomy("tags", tag_id)
+
+
+@mcp.tool()
+def merge_correspondents(source_id: int, target_id: int) -> dict[str, Any]:
+    """Merge ``source_id`` correspondent into ``target_id``, then delete source.
+
+    Composite operation in three legs:
+      1. List documents currently assigned to ``source_id``.
+      2. ``bulk_set_correspondent`` of those documents to ``target_id``.
+      3. ``delete_correspondent(source_id)``.
+
+    Partial failures are surfaced rather than swallowed — if leg 2 fails the
+    source is *not* deleted, and the return value tells the caller exactly
+    which legs landed.
+
+    Returns
+    -------
+    ``{ok, source_id, target_id, documents_moved, source_deleted, ...}``
+
+    On error, ``ok=False`` plus ``error`` (and ``status`` from the failing
+    leg) accompany the partial-success fields.
+    """
+    if source_id == target_id:
+        return {
+            "ok": False,
+            "error": "source_id and target_id are the same; nothing to merge",
+            "source_id": source_id,
+            "target_id": target_id,
+            "documents_moved": 0,
+            "source_deleted": False,
+        }
+
+    # Leg 1: collect all documents under source_id. Use the helper at the
+    # taxonomy cap (200) — if a single correspondent has more than 200 docs
+    # the caller can re-run the merge; rare in practice.
+    docs = _list_documents(
+        correspondent_id=source_id,
+        limit=_LIST_TAXONOMY_MAX_LIMIT,
+    )
+    if not docs.get("results") and "ok" in docs and docs["ok"] is False:
+        return {
+            "ok": False,
+            "error": f"list documents failed: {docs.get('error', '')}",
+            "status": docs.get("status"),
+            "source_id": source_id,
+            "target_id": target_id,
+            "documents_moved": 0,
+            "source_deleted": False,
+        }
+
+    document_ids = [d["id"] for d in docs.get("results", [])]
+
+    # Leg 2: reassign (skip if source is empty).
+    if document_ids:
+        move_result = _bulk_edit(
+            "set_correspondent", document_ids, {"correspondent": target_id}
+        )
+        if not move_result.get("ok"):
+            return {
+                "ok": False,
+                "error": f"bulk_edit failed: {move_result.get('error', '')}",
+                "status": move_result.get("status"),
+                "source_id": source_id,
+                "target_id": target_id,
+                "documents_moved": 0,
+                "source_deleted": False,
+            }
+
+    # Leg 3: delete source.
+    delete_result = _delete_taxonomy("correspondents", source_id)
+    if not delete_result.get("ok"):
+        return {
+            "ok": False,
+            "error": f"delete source failed: {delete_result.get('error', '')}",
+            "status": delete_result.get("status"),
+            "source_id": source_id,
+            "target_id": target_id,
+            "documents_moved": len(document_ids),
+            "source_deleted": False,
+        }
+
+    return {
+        "ok": True,
+        "source_id": source_id,
+        "target_id": target_id,
+        "documents_moved": len(document_ids),
+        "source_deleted": True,
+    }
 
 
 # --- Tag operations --------------------------------------------------------
