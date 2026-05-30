@@ -29,11 +29,11 @@ This MCP server wraps that endpoint behind tool calls.
 
 ## Status
 
-12 tools implemented and live-tested against a real Paperless-ngx instance.
+19 tools implemented and live-tested against a real Paperless-ngx instance.
 Resolvers + reads verified end-to-end; bulk operations are wired through the
-same `_bulk_edit` helper and share the same response shape. 11 pytest tests
-cover happy paths, empty results, errors, and the inbox-tag-resolution
-fallback for `list_inbox`.
+same `_bulk_edit` helper and share the same response shape. 35 pytest tests
+cover happy paths, empty results, errors, and composite-flow partial failures
+(merge_correspondents has 5 dedicated tests covering each leg's failure mode).
 
 ## Install
 
@@ -107,6 +107,9 @@ into the host config.
 |---|---|
 | `list_inbox(limit=20)` | List documents currently in the inbox tag. Resolves the tag ID via `PAPERLESS_INBOX_TAG_ID` env (preferred, no roundtrip) or a one-time `/api/tags/?name__icontains=eingang` lookup (cached for the process). Errors with the candidate list if the name is ambiguous or missing. |
 | `list_documents(tag_id?, correspondent_id?, document_type_id?, limit=20, ordering="-added")` | Generic server-side filter — combine tag, correspondent, and document-type filters. Returns a compact LLM-friendly shape: `{count, returned, results: [{id, title, added, correspondent, document_type, tags}]}`. For full-text search of document **content**, use PaperCortex instead. Limit is clamped to 100. |
+| `list_correspondents(limit=100, ordering="name")` | Full inventory of correspondents. Compact shape `{id, name, document_count}`. Useful for `"which correspondents do I have?"`-style questions. Limit clamped to 200. |
+| `list_tags(limit=100, ordering="name")` | Full inventory of tags. Compact shape `{id, name, document_count, color}`. Limit clamped to 200. |
+| `list_document_types(limit=100, ordering="name")` | Full inventory of document types. Compact shape `{id, name, document_count}`. Limit clamped to 200. |
 
 **Bulk write operations**
 
@@ -119,6 +122,14 @@ into the host config.
 | `bulk_set_document_type(document_ids, document_type_id)` | Assign document type (pass `None` to clear). |
 | `bulk_set_storage_path(document_ids, storage_path_id)` | Assign storage path (pass `None` to clear). |
 | `bulk_redo_ocr(document_ids)` | Queue OCR re-run on N documents (async on Paperless). |
+
+**Taxonomy cleanup**
+
+| Tool | Description |
+|---|---|
+| `delete_correspondent(correspondent_id)` | Delete a single correspondent. Documents lose their reference (set to `null` by Paperless). |
+| `delete_tag(tag_id)` | Delete a single tag. Documents simply lose it. |
+| `merge_correspondents(source_id, target_id)` | Composite: reassign all documents from `source_id` to `target_id` via `bulk_set_correspondent`, then delete the empty source. Partial failures surface in the result (source is *not* deleted if reassignment fails). |
 
 ### Deliberately not included
 
